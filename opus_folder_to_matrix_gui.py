@@ -8,16 +8,18 @@ de comando em seguida.
 Compilação (opcional) com PyInstaller::
 
     pyinstaller --onefile opus_folder_to_matrix_gui.py
+
+O módulo ``opus_folder_to_matrix`` é importado diretamente pela interface, não
+havendo necessidade de parâmetros extras como ``--add-data``.
 """
 
 from __future__ import annotations
 
-import shlex
-import subprocess
-import sys
-from pathlib import Path
+import io
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+
+from opus_folder_to_matrix import run as run_conversion
 
 FORMATS = ("xlsx", "csv")
 APP_TITLE = "Conversor OPUS para matriz"
@@ -45,40 +47,32 @@ def converter(formato_var: tk.StringVar) -> None:
     if not saida:
         return
 
-    cmd = [sys.executable, "opus_folder_to_matrix.py", pasta, "--format", formato, "-o", saida]
-    script_dir = Path(__file__).resolve().parent
-
+    log_buffer = io.StringIO()
     try:
-        completed = subprocess.run(
-            cmd,
-            check=True,
-            cwd=str(script_dir),
-            capture_output=True,
-            text=True,
+        outputs = run_conversion(
+            folder=pasta,
+            output=saida,
+            fmt=formato,
+            log_stream=log_buffer,
         )
-    except subprocess.CalledProcessError as exc:
-        command_display = " ".join(shlex.quote(arg) for arg in cmd)
-        output = (exc.stderr or exc.stdout or "").strip()
-        message = ["Falha ao converter os arquivos OPUS.", f"Comando: {command_display}"]
-        if output:
-            message.append("")
-            message.append(output)
-        messagebox.showerror("Erro na conversão", "\n".join(message))
-        return
-    except FileNotFoundError as exc:
-        messagebox.showerror(
-            "Erro na conversão",
-            "Não foi possível localizar o script base (opus_folder_to_matrix.py).\n\n" + str(exc),
-        )
-        return
-    except Exception as exc:  # pragma: no cover - erro inesperado
-        messagebox.showerror("Erro inesperado", f"Ocorreu um erro inesperado: {exc}")
+    except Exception as exc:
+        logs = log_buffer.getvalue().strip()
+        message_lines = ["Falha ao converter os arquivos OPUS.", str(exc)]
+        if logs:
+            message_lines.extend(["", logs])
+        messagebox.showerror("Erro na conversão", "\n".join(message_lines))
         return
 
-    output = (completed.stdout or "").strip()
-    message_lines = ["Conversão finalizada com sucesso!", f"Arquivo salvo em:\n{saida}"]
-    if output:
-        message_lines.extend(["", output])
+    logs = log_buffer.getvalue().strip()
+    output_paths = [str(path) for path in outputs] if outputs else [saida]
+    message_lines = ["Conversão finalizada com sucesso!"]
+    if len(output_paths) == 1:
+        message_lines.append(f"Arquivo salvo em:\n{output_paths[0]}")
+    else:
+        message_lines.append("Arquivos gerados:")
+        message_lines.extend(output_paths)
+    if logs:
+        message_lines.extend(["", logs])
     messagebox.showinfo("Conversão concluída", "\n".join(message_lines))
 
 

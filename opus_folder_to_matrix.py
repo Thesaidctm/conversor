@@ -30,10 +30,13 @@ import importlib
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, TextIO, Tuple, Union
 
 
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_META_COLS: Sequence[str] = ("Sample", "ID", "Operator", "Date", "Time")
 
 
 ReaderResult = Tuple[List[float], List[float], Dict[str, Any]]
@@ -252,90 +255,87 @@ def sanitize_header(values: Sequence[Any]) -> List[str]:
             out.append(h)
     return out
 
-def main() -> None:
-    """Ponto de entrada do utilitário de conversão de arquivos OPUS.
+def run(
+    folder: Union[str, Path],
+    output: Optional[Union[str, Path]] = None,
+    fmt: str = "xlsx",
+    *,
+    quiet: bool = False,
+    verbose: bool = False,
+    reader: Optional[str] = None,
+    meta_cols: Optional[Sequence[str]] = None,
+    log_stream: Optional[TextIO] = None,
+) -> List[Path]:
+    """Executa a conversão de uma pasta com arquivos OPUS.
 
-    Configura os argumentos da linha de comando, processa os arquivos da pasta
-    indicada e gera uma matriz tabular (XLSX ou CSV) com espectros e
-    metadados.
+    Args:
+        folder: Pasta contendo arquivos OPUS a serem processados.
+        output: Caminho do arquivo principal de saída. Quando ``None``, usa o
+            padrão ``opus_matrix.<fmt>``.
+        fmt: Formato desejado da saída (``"xlsx"`` ou ``"csv"``).
+        quiet: Quando ``True``, restringe o log a mensagens de erro.
+        verbose: Indica se o log deve incluir mensagens informativas.
+        reader: Nome do leitor específico a ser utilizado.
+        meta_cols: Lista opcional de colunas de metadados para priorizar.
+        log_stream: Objeto semelhante a arquivo para captura do log.
+
+    Returns:
+        Lista com os caminhos dos arquivos gerados.
 
     Raises:
-        SystemExit: Com código diferente de zero quando a pasta é inválida ou
-            nenhum arquivo é processado com sucesso.
-        RuntimeError: Se nenhum eixo de referência puder ser determinado.
+        FileNotFoundError: Se ``folder`` não existir.
+        NotADirectoryError: Se ``folder`` não for um diretório.
+        ValueError: Para parâmetros inválidos (por exemplo, formato desconhecido).
+        ImportError: Se um leitor obrigatório não estiver instalado.
+        RuntimeError: Quando nenhum arquivo pôde ser processado com sucesso.
     """
 
-    ap = argparse.ArgumentParser(
-        description="Converte uma pasta com arquivos Bruker OPUS em planilhas tabulares."
-    )
-    ap.add_argument("folder", help="Pasta com arquivos OPUS")
-    ap.add_argument(
-        "-o",
-        "--output",
-        default=None,
-        help="Arquivo de saída (padrão: opus_matrix.<formato>)",
-    )
-    ap.add_argument(
-        "--format",
-        choices=("xlsx", "csv"),
-        default="xlsx",
-        help="Formato do arquivo de saída. Padrão: xlsx.",
-    )
-    log_group = ap.add_mutually_exclusive_group()
-    log_group.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Exibe mensagens informativas (nível INFO).",
-    )
-    log_group.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Mostra apenas mensagens de erro (nível ERROR).",
-    )
-    ap.add_argument(
-        "--reader",
-        choices=tuple(READERS.keys()),
-        help="Força o uso de um leitor específico (opusFC ou spectrochempy).",
-    )
-    ap.add_argument(
-        "--meta-cols",
-        nargs="*",
-        default=["Sample", "ID", "Operator", "Date", "Time"],
-        help="Sugestões de colunas de metadados para destacar na frente (se existirem)",
-    )
-    args = ap.parse_args()
+    if quiet and verbose:
+        raise ValueError("Os parâmetros 'quiet' e 'verbose' não podem ser usados juntos.")
 
-    if args.verbose:
+    fmt_normalized = fmt.lower()
+    if fmt_normalized not in {"xlsx", "csv"}:
+        raise ValueError(f"Formato inválido: {fmt}")
+    fmt = fmt_normalized
+
+    meta_cols_list: List[str] = list(meta_cols) if meta_cols is not None else list(DEFAULT_META_COLS)
+
+    log_level = logging.ERROR if quiet else logging.INFO
+    if verbose:
         log_level = logging.INFO
-    elif args.quiet:
-        log_level = logging.ERROR
+
+    if log_stream is None:
+        logging.basicConfig(level=log_level, format="%(message)s", force=True)
     else:
-        log_level = logging.INFO
-    logging.basicConfig(level=log_level, format="%(message)s", force=True)
+        logging.basicConfig(level=log_level, format="%(message)s", stream=log_stream, force=True)
     logger.setLevel(log_level)
 
-    if args.reader:
-        module_name = "opusFC" if args.reader == "opusFC" else "spectrochempy"
+    folder_path = Path(folder)
+    if not folder_path.exists():
+        raise FileNotFoundError(folder_path)
+    if not folder_path.is_dir():
+        raise NotADirectoryError(folder_path)
+
+    if reader is not None:
+        if reader not in READERS:
+            raise ValueError(f"Leitor desconhecido: {reader}")
+        module_name = "opusFC" if reader == "opusFC" else "spectrochempy"
         try:
             importlib.import_module(module_name)
         except ImportError as exc:  # pragma: no cover - depende de pacotes externos
             suggestion = "pip install opusFC" if module_name == "opusFC" else 'pip install "spectrochempy[full]"'
-            ap.error(
-                f"O leitor '{args.reader}' foi selecionado, mas o pacote '{module_name}' não está disponível. "
+            raise ImportError(
+                f"O leitor '{reader}' foi selecionado, mas o pacote '{module_name}' não está disponível. "
                 f"Instale-o com `{suggestion}`."
-            )
-        readers_to_try: Sequence[str] = [args.reader]
+            ) from exc
+        readers_to_try: Sequence[str] = [reader]
     else:
         readers_to_try = list(READERS.keys())
 
-    folder = Path(args.folder)
-    if not folder.exists() or not folder.is_dir():
-        ap.error(f"Pasta inválida: {folder}")
-
-    files: List[Path] = scan_opus_files(folder)
+    files: List[Path] = scan_opus_files(folder_path)
     if not files:
         logger.error("Nenhum arquivo OPUS encontrado.")
-        sys.exit(1)
+        raise RuntimeError("Nenhum arquivo OPUS encontrado.")
 
     logger.info("Encontrados %s arquivos. Lendo...", len(files))
 
@@ -374,9 +374,10 @@ def main() -> None:
 
     if not rows:
         logger.error("Nenhum arquivo pôde ser lido com sucesso.")
-        sys.exit(2)
+        raise RuntimeError("Nenhum arquivo pôde ser lido com sucesso.")
 
     if ref_axis is None:
+        logger.error("Eixo de referência não definido após o processamento dos arquivos.")
         raise RuntimeError("Eixo de referência não definido após o processamento dos arquivos.")
 
     import pandas as pd
@@ -386,7 +387,7 @@ def main() -> None:
         [dict({"sample_id": sid}, **{hx: y[i] for i, hx in enumerate(header_x)}) for sid, y, _ in rows]
     )
 
-    preferred: List[str] = [c for c in args.meta_cols if c in meta_all_keys]
+    preferred: List[str] = [c for c in meta_cols_list if c in meta_all_keys]
     other_keys: List[str] = sorted(k for k in meta_all_keys if k not in preferred)
 
     meta_rows: List[Dict[str, str]] = []
@@ -405,22 +406,24 @@ def main() -> None:
     )
     x_ref_df = pd.DataFrame({"x_ref": header_x})
 
-    if args.output is None:
-        out = Path(f"opus_matrix.{args.format}")
+    if output is None:
+        out = Path(f"opus_matrix.{fmt}")
     else:
-        out = Path(args.output)
+        out = Path(output)
 
-    if out.suffix.lower() != f".{args.format}":
-        logger.info("Ajustando extensão do arquivo de saída para .%s", args.format)
-        out = out.with_suffix(f".{args.format}")
+    if out.suffix.lower() != f".{fmt}":
+        logger.info("Ajustando extensão do arquivo de saída para .%s", fmt)
+        out = out.with_suffix(f".{fmt}")
 
-    if args.format == "xlsx":
+    outputs: List[Path]
+    if fmt == "xlsx":
         with pd.ExcelWriter(out, engine="openpyxl") as writer:
             mat_df.to_excel(writer, index=False, sheet_name="matrix")
             meta_df.to_excel(writer, index=False, sheet_name="meta")
             x_ref_df.to_excel(writer, index=False, sheet_name="x_ref")
             info_df.to_excel(writer, index=False, sheet_name="info")
         logger.info("Arquivo XLSX gerado: %s (abas matrix/meta/x_ref/info)", out)
+        outputs = [out]
     else:
         matrix_path = out
         meta_path = out.with_name(f"{out.stem}_meta.csv")
@@ -437,6 +440,69 @@ def main() -> None:
             xref_path,
             info_path,
         )
+        outputs = [matrix_path, meta_path, xref_path, info_path]
+
+    return outputs
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    """Processa argumentos CLI e delega a conversão para :func:`run`."""
+
+    ap = argparse.ArgumentParser(
+        description="Converte uma pasta com arquivos Bruker OPUS em planilhas tabulares."
+    )
+    ap.add_argument("folder", help="Pasta com arquivos OPUS")
+    ap.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Arquivo de saída (padrão: opus_matrix.<formato>)",
+    )
+    ap.add_argument(
+        "--format",
+        choices=("xlsx", "csv"),
+        default="xlsx",
+        help="Formato do arquivo de saída. Padrão: xlsx.",
+    )
+    log_group = ap.add_mutually_exclusive_group()
+    log_group.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Exibe mensagens informativas (nível INFO).",
+    )
+    log_group.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Mostra apenas mensagens de erro (nível ERROR).",
+    )
+    ap.add_argument(
+        "--reader",
+        choices=tuple(READERS.keys()),
+        help="Força o uso de um leitor específico (opusFC ou spectrochempy).",
+    )
+    ap.add_argument(
+        "--meta-cols",
+        nargs="*",
+        default=list(DEFAULT_META_COLS),
+        help="Sugestões de colunas de metadados para destacar na frente (se existirem)",
+    )
+    args = ap.parse_args(argv)
+
+    try:
+        run(
+            folder=args.folder,
+            output=args.output,
+            fmt=args.format,
+            quiet=args.quiet,
+            verbose=args.verbose,
+            reader=args.reader,
+            meta_cols=args.meta_cols,
+        )
+    except (FileNotFoundError, NotADirectoryError, ImportError, ValueError) as exc:
+        ap.error(str(exc))
+    except RuntimeError:
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

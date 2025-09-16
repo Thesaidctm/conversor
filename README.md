@@ -69,6 +69,17 @@ pyinstaller opus_folder_to_matrix.py
 # O binário resultante ficará em dist/opus_folder_to_matrix/
 ```
 
+Para empacotar a interface gráfica basta apontar o PyInstaller para o módulo
+da GUI:
+
+```bash
+pyinstaller --onefile opus_folder_to_matrix_gui.py
+```
+
+Como ``opus_folder_to_matrix_gui.py`` importa diretamente o módulo de
+conversão, não é necessário utilizar opções extras como ``--add-data`` para que
+o script principal seja incluído no executável.
+
 # Licença
 
 Este projeto não possui uma licença explícita. Entre em contato com os
