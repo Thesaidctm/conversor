@@ -209,11 +209,12 @@ def scan_opus_files(folder: Path) -> List[Path]:
     if not folder.is_dir():
         raise NotADirectoryError(folder)
 
-    exts: Set[str] = {".0", ".OPUS", ".opus", ".spc", ".sp"}
+    exts: Set[str] = {".0", ".opus", ".spc", ".sp"}
     files: List[Path] = []
     for p in folder.rglob("*"):
         if p.is_file():
-            if p.suffix in exts or p.suffix == "":
+            suffix = p.suffix.lower()
+            if suffix in exts or (suffix.startswith(".") and suffix[1:].isdigit()) or suffix == "":
                 files.append(p)
     # Ordem estável por nome
     files.sort()
