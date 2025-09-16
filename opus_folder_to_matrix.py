@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-opus_folder_to_matrix.py — Varre uma pasta com arquivos Bruker OPUS e gera um Excel "matricial":
+opus_folder_to_matrix.py — Varre uma pasta com arquivos Bruker OPUS e gera uma
+matriz tabular (XLSX ou CSV):
+
 - Uma linha por amostra (arquivo)
 - Colunas = eixo espectral comum (número de onda cm^-1, por padrão)
-- Primeira coluna = sample_id (nome do arquivo, sem extensão)
-- Abas: "matrix" (espectros alinhados) e "meta" (metadados por amostra)
+- Primeira coluna = ``sample_id`` (nome do arquivo, sem extensão)
+- Saída XLSX: abas ``matrix``/``meta``/``x_ref``/``info``
+- Saída CSV: arquivos ``*_matrix.csv``/``*_meta.csv``/``*_x_ref.csv``/``*_info.csv``
 
-Uso:
-  python opus_folder_to_matrix.py /caminho/para/pasta -o saida.xlsx
+Uso básico:
+  python opus_folder_to_matrix.py /caminho/para/pasta --format xlsx -o matriz.xlsx
+  python opus_folder_to_matrix.py /caminho/para/pasta --format csv -o matriz.csv
 
-Dependências (instale ao menos uma das leituras):
+Dependências principais (instale ao menos uma das leituras):
   pip install opusFC pandas openpyxl
   # ou
   pip install "spectrochempy[full]" pandas openpyxl
@@ -22,12 +26,21 @@ Observações:
 """
 
 import argparse
+import importlib
+import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 
-def try_read_opus_opusFC(path: str) -> Tuple[List[float], List[float], Dict[str, Any]]:
+logger = logging.getLogger(__name__)
+
+
+ReaderResult = Tuple[List[float], List[float], Dict[str, Any]]
+ReaderFunc = Callable[[str], ReaderResult]
+
+
+def try_read_opus_opusFC(path: str) -> ReaderResult:
     """Lê um arquivo OPUS usando ``opusFC``.
 
     Args:
@@ -59,7 +72,7 @@ def try_read_opus_opusFC(path: str) -> Tuple[List[float], List[float], Dict[str,
     return x_values, y_values, meta
 
 
-def try_read_opus_spectrochempy(path: str) -> Tuple[List[float], List[float], Dict[str, Any]]:
+def try_read_opus_spectrochempy(path: str) -> ReaderResult:
     """Lê um arquivo OPUS usando ``spectrochempy``.
 
     Args:
@@ -88,11 +101,19 @@ def try_read_opus_spectrochempy(path: str) -> Tuple[List[float], List[float], Di
             meta[k] = repr(v)
     return x, y, meta
 
-def read_opus_any(path: str) -> Tuple[Tuple[List[float], List[float], Dict[str, Any]], str]:
+
+READERS: Dict[str, ReaderFunc] = {
+    "opusFC": try_read_opus_opusFC,
+    "spectrochempy": try_read_opus_spectrochempy,
+}
+
+def read_opus_any(path: str, reader_names: Optional[Sequence[str]] = None) -> Tuple[ReaderResult, str]:
     """Tenta ler um arquivo OPUS com qualquer leitor suportado.
 
     Args:
         path: Caminho do arquivo OPUS a ser processado.
+        reader_names: Sequência opcional com os nomes dos leitores a tentar,
+            na ordem desejada.
 
     Returns:
         Uma tupla contendo o resultado do leitor escolhido (``x``, ``y`` e
@@ -102,12 +123,11 @@ def read_opus_any(path: str) -> Tuple[Tuple[List[float], List[float], Dict[str, 
         RuntimeError: Se todos os leitores falharem ao interpretar o arquivo.
     """
     last: Optional[Exception] = None
-    for reader_name, reader in [
-        ("opusFC", try_read_opus_opusFC),
-        ("spectrochempy", try_read_opus_spectrochempy),
-    ]:
+    names: Sequence[str] = reader_names or tuple(READERS.keys())
+    for reader_name in names:
+        reader = READERS[reader_name]
         try:
-            return reader(*[path]), reader_name  # return (x,y,meta), name
+            return reader(path), reader_name  # return (x,y,meta), name
         except Exception as e:
             last = e
     raise RuntimeError(f"Falha ao ler {path}: {last}")
@@ -236,7 +256,8 @@ def main() -> None:
     """Ponto de entrada do utilitário de conversão de arquivos OPUS.
 
     Configura os argumentos da linha de comando, processa os arquivos da pasta
-    indicada e gera um arquivo XLSX com matriz de espectros e metadados.
+    indicada e gera uma matriz tabular (XLSX ou CSV) com espectros e
+    metadados.
 
     Raises:
         SystemExit: Com código diferente de zero quando a pasta é inválida ou
@@ -244,12 +265,68 @@ def main() -> None:
         RuntimeError: Se nenhum eixo de referência puder ser determinado.
     """
 
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="Converte uma pasta com arquivos Bruker OPUS em planilhas tabulares."
+    )
     ap.add_argument("folder", help="Pasta com arquivos OPUS")
-    ap.add_argument("-o", "--output", default="opus_matrix.xlsx", help="Arquivo XLSX de saída")
-    ap.add_argument("--meta-cols", nargs="*", default=["Sample", "ID", "Operator", "Date", "Time"],
-                    help="Sugestões de colunas de metadados para destacar na frente (se existirem)")
+    ap.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Arquivo de saída (padrão: opus_matrix.<formato>)",
+    )
+    ap.add_argument(
+        "--format",
+        choices=("xlsx", "csv"),
+        default="xlsx",
+        help="Formato do arquivo de saída. Padrão: xlsx.",
+    )
+    log_group = ap.add_mutually_exclusive_group()
+    log_group.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Exibe mensagens informativas (nível INFO).",
+    )
+    log_group.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Mostra apenas mensagens de erro (nível ERROR).",
+    )
+    ap.add_argument(
+        "--reader",
+        choices=tuple(READERS.keys()),
+        help="Força o uso de um leitor específico (opusFC ou spectrochempy).",
+    )
+    ap.add_argument(
+        "--meta-cols",
+        nargs="*",
+        default=["Sample", "ID", "Operator", "Date", "Time"],
+        help="Sugestões de colunas de metadados para destacar na frente (se existirem)",
+    )
     args = ap.parse_args()
+
+    if args.verbose:
+        log_level = logging.INFO
+    elif args.quiet:
+        log_level = logging.ERROR
+    else:
+        log_level = logging.INFO
+    logging.basicConfig(level=log_level, format="%(message)s", force=True)
+    logger.setLevel(log_level)
+
+    if args.reader:
+        module_name = "opusFC" if args.reader == "opusFC" else "spectrochempy"
+        try:
+            importlib.import_module(module_name)
+        except ImportError as exc:  # pragma: no cover - depende de pacotes externos
+            suggestion = "pip install opusFC" if module_name == "opusFC" else 'pip install "spectrochempy[full]"'
+            ap.error(
+                f"O leitor '{args.reader}' foi selecionado, mas o pacote '{module_name}' não está disponível. "
+                f"Instale-o com `{suggestion}`."
+            )
+        readers_to_try: Sequence[str] = [args.reader]
+    else:
+        readers_to_try = list(READERS.keys())
 
     folder = Path(args.folder)
     if not folder.exists() or not folder.is_dir():
@@ -257,10 +334,10 @@ def main() -> None:
 
     files: List[Path] = scan_opus_files(folder)
     if not files:
-        print("Nenhum arquivo OPUS encontrado.", file=sys.stderr)
+        logger.error("Nenhum arquivo OPUS encontrado.")
         sys.exit(1)
 
-    print(f"Encontrados {len(files)} arquivos. Lendo...")
+    logger.info("Encontrados %s arquivos. Lendo...", len(files))
 
     rows: List[Tuple[str, List[float], Dict[str, str]]] = []
     ref_axis: Optional[List[float]] = None
@@ -269,26 +346,22 @@ def main() -> None:
 
     for f in files:
         try:
-            (x, y, meta), _reader_name = read_opus_any(str(f))
-        except Exception as e:
-            print(f"[ERRO] {f.name}: {e}", file=sys.stderr)
+            (x, y, meta), _reader_name = read_opus_any(str(f), readers_to_try)
+        except Exception as e:  # pragma: no cover - depende de dados externos
+            logger.error("Falha ao ler %s: %s", f.name, e)
             continue
 
-        # sample_id: nome do arquivo sem extensão(s)
         sample_id: str = f.stem
-        # escolhe eixo de referência no primeiro sucesso
         if ref_axis is None:
             ref_axis = list(x)
             ref_file = f.name
-            print(f"→ Eixo de referência: {len(ref_axis)} pontos ({ref_file})")
+            logger.info("→ Eixo de referência: %s pontos (%s)", len(ref_axis), ref_file)
 
-        # interpola se necessário
         if len(x) != len(ref_axis) or any(abs(float(a) - float(b)) > 1e-9 for a, b in zip(x, ref_axis)):
             y_aligned: List[float] = interp_to_axis(x, y, ref_axis)
         else:
             y_aligned = list(y)
 
-        # normaliza metadados para dict simples de str
         flat: Dict[str, str] = {}
         for k, v in (meta or {}).items():
             try:
@@ -300,23 +373,19 @@ def main() -> None:
         rows.append((sample_id, y_aligned, flat))
 
     if not rows:
-        print("Nenhum arquivo pôde ser lido com sucesso.", file=sys.stderr)
+        logger.error("Nenhum arquivo pôde ser lido com sucesso.")
         sys.exit(2)
 
     if ref_axis is None:
         raise RuntimeError("Eixo de referência não definido após o processamento dos arquivos.")
-    assert ref_axis is not None
 
-    # DataFrames
     import pandas as pd
 
     header_x: List[str] = sanitize_header(ref_axis)
-    # "matrix": primeira coluna = sample_id; demais = eixo
     mat_df = pd.DataFrame(
         [dict({"sample_id": sid}, **{hx: y[i] for i, hx in enumerate(header_x)}) for sid, y, _ in rows]
     )
 
-    # opcional: destacar algumas metacolunas no início
     preferred: List[str] = [c for c in args.meta_cols if c in meta_all_keys]
     other_keys: List[str] = sorted(k for k in meta_all_keys if k not in preferred)
 
@@ -328,19 +397,46 @@ def main() -> None:
         meta_rows.append(row)
     meta_df = pd.DataFrame(meta_rows, columns=["sample_id"] + preferred + other_keys)
 
-    out = Path(args.output)
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        mat_df.to_excel(writer, index=False, sheet_name="matrix")
-        meta_df.to_excel(writer, index=False, sheet_name="meta")
-        # Abas extras: eixo de referência + info
-        pd.DataFrame({"x_ref": header_x}).to_excel(writer, index=False, sheet_name="x_ref")
-        info = pd.DataFrame([
+    info_df = pd.DataFrame(
+        [
             {"key": "reference_file", "value": ref_file},
             {"key": "n_files_parsed", "value": len(rows)},
-        ])
-        info.to_excel(writer, index=False, sheet_name="info")
+        ]
+    )
+    x_ref_df = pd.DataFrame({"x_ref": header_x})
 
-    print(f"[OK] Gerado: {out} (matrix/meta/x_ref/info)")
+    if args.output is None:
+        out = Path(f"opus_matrix.{args.format}")
+    else:
+        out = Path(args.output)
+
+    if out.suffix.lower() != f".{args.format}":
+        logger.info("Ajustando extensão do arquivo de saída para .%s", args.format)
+        out = out.with_suffix(f".{args.format}")
+
+    if args.format == "xlsx":
+        with pd.ExcelWriter(out, engine="openpyxl") as writer:
+            mat_df.to_excel(writer, index=False, sheet_name="matrix")
+            meta_df.to_excel(writer, index=False, sheet_name="meta")
+            x_ref_df.to_excel(writer, index=False, sheet_name="x_ref")
+            info_df.to_excel(writer, index=False, sheet_name="info")
+        logger.info("Arquivo XLSX gerado: %s (abas matrix/meta/x_ref/info)", out)
+    else:
+        matrix_path = out
+        meta_path = out.with_name(f"{out.stem}_meta.csv")
+        xref_path = out.with_name(f"{out.stem}_x_ref.csv")
+        info_path = out.with_name(f"{out.stem}_info.csv")
+        mat_df.to_csv(matrix_path, index=False)
+        meta_df.to_csv(meta_path, index=False)
+        x_ref_df.to_csv(xref_path, index=False)
+        info_df.to_csv(info_path, index=False)
+        logger.info(
+            "Arquivos CSV gerados: %s, %s, %s, %s",
+            matrix_path,
+            meta_path,
+            xref_path,
+            info_path,
+        )
 
 if __name__ == "__main__":
     main()
